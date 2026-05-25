@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>家庭积分乐园</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+<!-- ==================== Auth Screen ==================== -->
+<div id="auth-screen" class="hidden">
+  <div class="auth-container">
+    <div class="auth-card card p-5">
+
+      <div id="auth-error" class="auth-error hidden mb-3"></div>
+
+      <!-- Login Form -->
+      <div id="login-form">
+        <h1 class="text-gray-800">🏰 家庭积分乐园</h1>
+        <p class="auth-subtitle">欢迎回来！请登录你的账号</p>
+
+        <div class="flex flex-col gap-3">
+          <div>
+            <label class="text-xs font-bold text-gray-400 uppercase tracking-wide">用户名</label>
+            <input type="text" id="login-username" placeholder="请输入用户名" autocomplete="username">
+          </div>
+          <div>
+            <label class="text-xs font-bold text-gray-400 uppercase tracking-wide">密码</label>
+            <input type="password" id="login-password" placeholder="请输入密码" autocomplete="current-password">
+          </div>
+          <button class="w-full py-3 rounded-xl font-black text-white btn-bounce bg-sky-deep text-lg hover-bg-sky-deep mt-2"
+            onclick="handleLogin()">
+            🔑 登录
+          </button>
+        </div>
+
+        <p class="text-center mt-4">
+          <button class="auth-link" id="auth-mode-text" onclick="toggleAuthMode('register')">还没有账号？注册</button>
+        </p>
+      </div>
+
+      <!-- Register Form -->
+      <div id="register-form" class="hidden">
+        <h1 class="text-gray-800">🏰 加入家庭</h1>
+        <p class="auth-subtitle">创建你的家庭账号</p>
+
+        <!-- Role toggle -->
+        <div class="role-toggle mb-3" id="reg-role-toggle">
+          <button id="reg-role-parent" class="active" onclick="setRegisterRole('parent')">👨‍👩‍👧 我是家长</button>
+          <button id="reg-role-child" onclick="setRegisterRole('child')">🧒 我是孩子</button>
+        </div>
+
+        <div class="flex flex-col gap-3">
+          <div>
+            <label class="text-xs font-bold text-gray-400 uppercase tracking-wide">用户名 *</label>
+            <input type="text" id="reg-username" placeholder="3-20位字母、数字或中文">
+          </div>
+          <div>
+            <label class="text-xs font-bold text-gray-400 uppercase tracking-wide">密码 *</label>
+            <input type="password" id="reg-password" placeholder="至少6位密码">
+          </div>
+          <div>
+            <label class="text-xs font-bold text-gray-400 uppercase tracking-wide">显示名称 *</label>
+            <input type="text" id="reg-display-name" placeholder="在应用中显示的名字，如：妈妈、小豆豆">
+          </div>
+          <div id="reg-family-name-group">
+            <label class="text-xs font-bold text-gray-400 uppercase tracking-wide">家庭名称 *</label>
+            <input type="text" id="reg-family-name" placeholder="给你的家庭取个名字，如：快乐一家">
+          </div>
+          <div id="reg-invite-group" class="hidden">
+            <label class="text-xs font-bold text-gray-400 uppercase tracking-wide">邀请码 *</label>
+            <input type="text" id="reg-invite-code" placeholder="请输入家长提供的6位邀请码" style="text-transform:uppercase">
+          </div>
+          <button class="w-full py-3 rounded-xl font-black text-white btn-bounce bg-grass-mid text-lg hover-bg-grass-deep mt-2"
+            onclick="handleRegister()">
+            🎉 注册
+          </button>
+        </div>
+
+        <p class="text-center mt-4">
+          <button class="auth-link" onclick="toggleAuthMode('login')">已有账号？登录</button>
+        </p>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+
+<!-- ==================== Main App ==================== -->
+<div id="app-screen" class="hidden">
+
+  <!-- Header -->
+  <header>
+    <div class="container">
+      <div class="flex items-center justify-between py-3">
+        <div class="flex items-center gap-3">
+          <div class="avatar" id="header-avatar">🐼</div>
+          <div>
+            <div class="font-bold text-gray-800 text-base" id="header-name">加载中...</div>
+            <div class="text-xs text-gray-400" id="header-subtitle">✨ 今日也要加油哦</div>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-3">
+          <div class="starburst flex items-center gap-2 px-5 py-2">
+            <span class="text-2xl">⭐</span>
+            <span class="font-black text-white text-2xl" id="totalPoints">0</span>
+            <span class="text-white-80 text-sm font-bold">积分</span>
+          </div>
+          <button class="text-xs text-gray-400 cursor-pointer bg-transparent border-none font-inherit hover:text-gray-600"
+            onclick="handleLogout()" title="退出登录" style="font-family:inherit">退出</button>
+        </div>
+      </div>
+
+      <!-- Child selector -->
+      <div class="child-selector pb-3" id="childSelector"></div>
+    </div>
+  </header>
+
+  <main class="container py-6">
+
+    <!-- Tab switch -->
+    <div class="flex gap-2 mb-6" id="tabContainer">
+      <button class="tab-btn active rounded-full px-5 py-2 text-sm font-bold" data-view="child" onclick="switchView('child')">
+        🧒 孩子视图
+      </button>
+      <button class="tab-btn rounded-full px-5 py-2 text-sm font-bold bg-gray-100 text-gray-600" data-view="parent" onclick="switchView('parent')">
+        👨‍👩‍👧 父母管理
+      </button>
+    </div>
+
+    <!-- Child View -->
+    <div id="child-view">
+
+      <div class="grid grid-3 gap-3 mb-6">
+        <div class="card p-3 flex items-center gap-3 cursor-pointer hover-bg-sky-light">
+          <span class="emoji-icon">📋</span>
+          <div>
+            <div class="text-xs text-gray-400">待完成任务</div>
+            <div class="font-black text-lg text-sky-deep" id="pendingCount">0</div>
+          </div>
+        </div>
+        <div class="card p-3 flex items-center gap-3 cursor-pointer hover-bg-grass-light">
+          <span class="emoji-icon">✅</span>
+          <div>
+            <div class="text-xs text-gray-400">今日已完成</div>
+            <div class="font-black text-lg text-grass-deep" id="doneCount">0</div>
+          </div>
+        </div>
+        <div class="card p-3 flex items-center gap-3 cursor-pointer hover-bg-coral-light">
+          <span class="emoji-icon">🎁</span>
+          <div>
+            <div class="text-xs text-gray-400">可兑换奖励</div>
+            <div class="font-black text-lg text-coral-deep" id="rewardCount">0</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid grid-2 gap-6">
+        <section>
+          <div class="card p-5">
+            <h2 class="text-lg font-black text-gray-700 mb-4 flex items-center gap-2">
+              <span>📝</span> 今日任务清单
+            </h2>
+            <div class="flex flex-col gap-3" id="taskList"></div>
+          </div>
+          <div class="card p-5 mt-4">
+            <h3 class="text-sm font-bold text-gray-500 mb-3">🌟 今日完成进度</h3>
+            <div class="progress-bar mb-2">
+              <div class="progress-fill bg-gradient-to-r" id="dailyProgress" style="width:0%"></div>
+            </div>
+            <div class="text-xs text-gray-400 text-right" id="progressText">0/0 项已完成</div>
+          </div>
+        </section>
+
+        <section>
+          <div class="card p-5">
+            <h2 class="text-lg font-black text-gray-700 mb-4 flex items-center gap-2">
+              <span>🏪</span> 心愿兑换商店
+            </h2>
+            <div class="flex flex-col gap-3" id="rewardList"></div>
+          </div>
+          <div class="card p-5 mt-4">
+            <h3 class="text-sm font-bold text-gray-500 mb-3">📜 最近记录</h3>
+            <div class="flex flex-col text-sm" id="historyList"></div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <!-- Parent View -->
+    <div id="parent-view" class="hidden">
+      <div class="card p-5 mb-6">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-lg font-black text-gray-700 flex items-center gap-2">
+            <span>⏳</span> 待审核申请
+          </h2>
+          <span class="bg-coral-mid text-white text-xs font-bold px-3 py-1 rounded-full" id="pendingReviewBadge">0 条待处理</span>
+        </div>
+        <div class="flex flex-col gap-3" id="reviewList"></div>
+        <div id="emptyReview" class="text-center text-gray-300 py-6 text-sm hidden">
+          🎉 没有待审核的申请啦
+        </div>
+      </div>
+
+      <div class="grid grid-2 gap-6">
+        <div class="card p-5">
+          <h2 class="text-lg font-black text-gray-700 mb-4 flex items-center gap-2">
+            <span>✏️</span> 手动调整积分
+          </h2>
+          <div class="flex flex-col gap-3">
+            <div>
+              <label class="text-xs font-bold text-gray-400 uppercase tracking-wide">操作类型</label>
+              <div class="flex gap-2 mt-1">
+                <button class="flex-1 py-2 rounded-xl font-bold text-sm btn-bounce bg-grass-light text-grass-deep adjust-type-btn" id="addBtn"
+                  onclick="setAdjustType('add')">➕ 加分</button>
+                <button class="flex-1 py-2 rounded-xl font-bold text-sm btn-bounce bg-gray-100 text-gray-500 adjust-type-btn" id="deductBtn"
+                  onclick="setAdjustType('deduct')">➖ 扣分</button>
+              </div>
+            </div>
+            <div>
+              <label class="text-xs font-bold text-gray-400 uppercase tracking-wide">分值</label>
+              <input type="number" id="adjustAmount" value="5" min="1" max="100">
+            </div>
+            <div>
+              <label class="text-xs font-bold text-gray-400 uppercase tracking-wide">原因</label>
+              <select id="adjustReason">
+                <option>按时完成作业</option>
+                <option>帮忙做家务</option>
+                <option>按时刷牙洗脸</option>
+                <option>早睡早起</option>
+                <option>表现特别好</option>
+                <option>未按时睡觉</option>
+                <option>玩具没有收拾</option>
+                <option>发脾气/哭闹</option>
+                <option>其他（自定义）</option>
+              </select>
+            </div>
+            <button class="w-full py-3 rounded-xl font-black text-white btn-bounce bg-sky-deep text-lg hover-bg-sky-deep"
+              onclick="submitAdjust()">
+              确认提交 ✨
+            </button>
+          </div>
+        </div>
+
+        <div class="card p-5">
+          <h2 class="text-lg font-black text-gray-700 mb-4 flex items-center gap-2">
+            <span>⚙️</span> 快速管理
+          </h2>
+          <div class="flex flex-col gap-3">
+            <button class="w-full py-3 rounded-xl font-bold text-sm btn-bounce bg-sun-light text-sun-deep border-sun"
+              onclick="addTask()">➕ 添加新任务</button>
+            <button class="w-full py-3 rounded-xl font-bold text-sm btn-bounce bg-grass-light text-grass-deep border-grass"
+              onclick="addReward()">🎁 添加兑换商品</button>
+            <button class="w-full py-3 rounded-xl font-bold text-sm btn-bounce bg-coral-light text-coral-deep border-coral"
+              onclick="resetAll()">🔄 重置今日所有任务</button>
+            <div class="bg-gray-50 rounded-xl p-3 text-xs text-gray-400 leading-relaxed mt-2">
+              💡 <b>提示：</b>按键盘 <b>1</b> 切回孩子视图，<b>2</b> 切到管理后台。
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- Modal -->
+<div id="modal-overlay" class="modal-overlay hidden">
+  <div class="modal-card">
+    <div class="modal-icon" id="modal-icon">📝</div>
+    <h3 class="modal-title" id="modal-title"></h3>
+    <p class="modal-message" id="modal-message"></p>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="modal-actions" id="modal-actions"></div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="toast" class="toast-hide"></div>
+
+<script src="/js/api.js"></script>
+<script src="/js/app.js"></script>
+
+</body>
+</html>
