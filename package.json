@@ -4,7 +4,12 @@
   "description": "家庭积分乐园",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "deploy": "pm2 start ecosystem.config.js",
+    "stop": "pm2 stop family-points",
+    "restart": "pm2 restart family-points",
+    "logs": "pm2 logs family-points",
+    "status": "pm2 status"
   },
   "dependencies": {
     "express": "^4.18.2",

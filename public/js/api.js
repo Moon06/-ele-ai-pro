@@ -43,6 +43,7 @@ window.API = (function() {
     register: function(body) { return request('POST', '/auth/register', body); },
     login: function(body) { return request('POST', '/auth/login', body); },
     getMe: function() { return request('GET', '/auth/me'); },
+    updateProfile: function(body) { return request('PUT', '/auth/profile', body); },
 
     // Family
     getInviteCode: function() { return request('GET', '/family/invite-code'); },
@@ -77,6 +78,15 @@ window.API = (function() {
 
     // Children
     getChildren: function() { return request('GET', '/children'); },
-    getChildDashboard: function(childId) { return request('GET', '/children/' + childId + '/dashboard'); }
+    getChildDashboard: function(childId) { return request('GET', '/children/' + childId + '/dashboard'); },
+
+    // Pets
+    getPet: function(childId) { return request('GET', '/pets/' + childId); },
+    adoptPet: function(body) { return request('POST', '/pets/adopt', body); },
+    carePet: function(petId, action) { return request('POST', '/pets/' + petId + '/care', { action: action }); },
+
+    // Admin
+    getBackups: function() { return request('GET', '/admin/backups'); },
+    restoreBackup: function(filename) { return request('POST', '/admin/backups/' + encodeURIComponent(filename) + '/restore'); }
   };
 })();

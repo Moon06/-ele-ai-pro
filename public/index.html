@@ -51,6 +51,12 @@
           <button id="reg-role-child" onclick="setRegisterRole('child')">🧒 我是孩子</button>
         </div>
 
+        <!-- Parent sub-mode: create or join -->
+        <div class="role-toggle mb-3 hidden" id="reg-parent-mode-toggle">
+          <button id="reg-parent-create" class="active" onclick="setParentMode('create')">🏠 创建新家庭</button>
+          <button id="reg-parent-join" onclick="setParentMode('join')">🔗 加入已有家庭</button>
+        </div>
+
         <div class="flex flex-col gap-3">
           <div>
             <label class="text-xs font-bold text-gray-400 uppercase tracking-wide">用户名 *</label>
@@ -101,6 +107,8 @@
             <div class="font-bold text-gray-800 text-base" id="header-name">加载中...</div>
             <div class="text-xs text-gray-400" id="header-subtitle">✨ 今日也要加油哦</div>
           </div>
+          <button class="bg-transparent border-none cursor-pointer text-gray-400 hover:text-gray-600 p-1"
+            onclick="showProfileEditor()" title="编辑个人资料" style="font-family:inherit;font-size:1.1rem;">⚙️</button>
         </div>
 
         <div class="flex items-center gap-3">
@@ -133,6 +141,8 @@
 
     <!-- Child View -->
     <div id="child-view">
+
+      <div id="pet-container" class="mb-4"></div>
 
       <div class="grid grid-3 gap-3 mb-6">
         <div class="card p-3 flex items-center gap-3 cursor-pointer hover-bg-sky-light">
@@ -256,6 +266,8 @@
               onclick="addReward()">🎁 添加兑换商品</button>
             <button class="w-full py-3 rounded-xl font-bold text-sm btn-bounce bg-coral-light text-coral-deep border-coral"
               onclick="resetAll()">🔄 重置今日所有任务</button>
+            <button class="w-full py-3 rounded-xl font-bold text-sm btn-bounce bg-gray-100 text-gray-600"
+              onclick="showBackupManager()">💾 备份管理</button>
             <div class="bg-gray-50 rounded-xl p-3 text-xs text-gray-400 leading-relaxed mt-2">
               💡 <b>提示：</b>按键盘 <b>1</b> 切回孩子视图，<b>2</b> 切到管理后台。
             </div>

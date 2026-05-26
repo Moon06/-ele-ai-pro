@@ -1,7 +1,7 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
-const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_SECRET = process.env.JWT_SECRET || 'family-points-paradise-secret-key-2026';
 const TOKEN_EXPIRY = 60 * 60 * 24 * 7; // 7 days
 
 function hashPassword(password) {

@@ -4,7 +4,8 @@ const {
   getCompletion, createCompletion, getPendingReviews, approveCompletion, rejectCompletion, resetAllTasks,
   getRewards, getRewardById, createReward, updateReward, deleteReward, createRedemption,
   getChildPoints, addPointHistory, getHistory,
-  seedDefaults, transaction, queryOne,
+  seedDefaults, transaction, queryOne, updateUser, listBackups, restoreBackup,
+  getPetByChildId, createPet, applyDecay, carePet, getCareCost, getCareActionName,
 } = require('./db');
 const { hashPassword, comparePassword, generateToken, requireAuth, requireParent } = require('./auth');
 
@@ -94,7 +95,7 @@ function registerRoutes(app) {
       // Seed defaults for new families
       const memberCount = getFamilyMembers(familyId).length;
       if (memberCount === 1) {
-        seedDefaults(familyId);
+        seedDefaults(familyId, user.id);
       }
 
       const token = generateToken(user);
@@ -130,7 +131,7 @@ function registerRoutes(app) {
         ok: true,
         data: {
           token,
-          user: { id: user.id, username: user.username, role: user.role, family_id: user.family_id, display_name: user.display_name, avatar_emoji: user.avatar_emoji },
+          user: { id: user.id, username: user.username, role: user.role, family_id: user.family_id, display_name: user.display_name, avatar_emoji: user.avatar_emoji, shop_name: user.shop_name },
           family,
           invite_code: family.invite_code,
           members
@@ -157,6 +158,48 @@ function registerRoutes(app) {
     }
   });
 
+  app.put('/api/auth/profile', requireAuth, (req, res) => {
+    try {
+      const { display_name, avatar_emoji, shop_name, current_password, new_password } = req.body;
+      const user = getUserById(req.user.userId);
+      if (!user) return badRequest(res, '用户不存在');
+
+      const fields = {};
+
+      if (display_name !== undefined) {
+        const err = validate(display_name, '显示名称', 1, 20);
+        if (err) return badRequest(res, err);
+        fields.display_name = display_name;
+      }
+
+      if (avatar_emoji !== undefined) {
+        if (avatar_emoji && avatar_emoji.length > 4) return badRequest(res, '头像格式不正确');
+        fields.avatar_emoji = avatar_emoji;
+      }
+
+      if (shop_name !== undefined) {
+        if (shop_name && shop_name.length > 20) return badRequest(res, '店铺名称不能超过20个字符');
+        fields.shop_name = shop_name;
+      }
+
+      if (new_password !== undefined && new_password !== '') {
+        if (!current_password) return badRequest(res, '请输入当前密码');
+        if (!comparePassword(current_password, user.password_hash)) return badRequest(res, '当前密码不正确');
+        const err = validate(new_password, '新密码', 6, 100);
+        if (err) return badRequest(res, err);
+        fields.password_hash = hashPassword(new_password);
+      }
+
+      if (Object.keys(fields).length === 0) return badRequest(res, '没有需要更新的信息');
+
+      const updated = updateUser(req.user.userId, fields);
+      res.json({ ok: true, data: { user: updated } });
+    } catch (e) {
+      console.error('Update profile error:', e);
+      serverError(res);
+    }
+  });
+
   // ==================== Family Routes ====================
 
   app.get('/api/family/invite-code', requireAuth, requireParent, (req, res) => {
@@ -172,6 +215,31 @@ function registerRoutes(app) {
     try {
       const members = getFamilyMembers(req.user.familyId);
       res.json({ ok: true, data: { members } });
+    } catch (e) {
+      serverError(res);
+    }
+  });
+
+  // ==================== Backup Routes ====================
+
+  app.get('/api/admin/backups', requireAuth, requireParent, (req, res) => {
+    try {
+      const backups = listBackups();
+      res.json({ ok: true, data: { backups } });
+    } catch (e) {
+      serverError(res);
+    }
+  });
+
+  app.post('/api/admin/backups/:filename/restore', requireAuth, requireParent, (req, res) => {
+    try {
+      const filename = req.params.filename;
+      if (!filename || filename.includes('..') || filename.includes('/')) {
+        return badRequest(res, '无效的文件名');
+      }
+      const ok = restoreBackup(filename);
+      if (!ok) return badRequest(res, '备份文件不存在或恢复失败');
+      res.json({ ok: true, data: { message: '备份已恢复，请刷新页面' } });
     } catch (e) {
       serverError(res);
     }
@@ -382,7 +450,7 @@ function registerRoutes(app) {
       err = validateInt(cost, '所需积分', 1, 9999);
       if (err) return badRequest(res, err);
 
-      const reward = createReward(req.user.familyId, icon || '🎁', title, cost);
+      const reward = createReward(req.user.familyId, icon || '🎁', title, cost, req.user.userId);
       res.json({ ok: true, data: { reward } });
     } catch (e) {
       serverError(res);
@@ -396,6 +464,7 @@ function registerRoutes(app) {
 
       const reward = getRewardById(rewardId);
       if (!reward || reward.family_id !== req.user.familyId) return badRequest(res, '奖励不存在');
+      if (reward.creator_id && reward.creator_id !== req.user.userId) return badRequest(res, '只能修改自己添加的商品');
 
       if (cost !== undefined) {
         const err = validateInt(cost, '所需积分', 1, 9999);
@@ -415,6 +484,9 @@ function registerRoutes(app) {
 
   app.delete('/api/rewards/:id', requireAuth, requireParent, (req, res) => {
     try {
+      const reward = getRewardById(parseInt(req.params.id, 10));
+      if (!reward || reward.family_id !== req.user.familyId) return badRequest(res, '奖励不存在');
+      if (reward.creator_id && reward.creator_id !== req.user.userId) return badRequest(res, '只能删除自己添加的商品');
       deleteReward(parseInt(req.params.id, 10), req.user.familyId);
       res.json({ ok: true });
     } catch (e) {
@@ -562,6 +634,84 @@ function registerRoutes(app) {
       });
     } catch (e) {
       console.error('Dashboard error:', e);
+      serverError(res);
+    }
+  });
+
+  // ==================== Pet Routes ====================
+
+  app.get('/api/pets/:childId', requireAuth, (req, res) => {
+    try {
+      const childId = parseInt(req.params.childId, 10);
+      let pet = getPetByChildId(childId);
+      if (!pet) return res.json({ ok: true, data: { pet: null } });
+
+      pet = applyDecay(pet);
+      res.json({ ok: true, data: { pet } });
+    } catch (e) {
+      serverError(res);
+    }
+  });
+
+  app.post('/api/pets/adopt', requireAuth, requireParent, (req, res) => {
+    try {
+      const { child_id, pet_type, pet_name } = req.body;
+
+      if (!['cat', 'dog', 'rabbit'].includes(pet_type)) return badRequest(res, '无效的宠物类型');
+      const err = validate(pet_name, '宠物名字', 1, 10);
+      if (err) return badRequest(res, err);
+
+      const child = queryOne('SELECT * FROM users WHERE id = ? AND family_id = ? AND role = ?', [child_id, req.user.familyId, 'child']);
+      if (!child) return badRequest(res, '孩子不存在');
+
+      const existing = getPetByChildId(child_id);
+      if (existing) return badRequest(res, '这个孩子已经领养过宠物了');
+
+      const adoptCost = 10;
+      const childPoints = getChildPoints(child_id);
+      if (childPoints < adoptCost) return badRequest(res, '积分不足，领养需要 ' + adoptCost + ' 积分，当前只有 ' + childPoints + ' 分');
+
+      const pet = transaction(() => {
+        const p = createPet(child_id, pet_type, pet_name);
+        addPointHistory(req.user.familyId, child_id, req.user.userId, -adoptCost, '🎪 领养宠物：' + pet_name, 'manual_adjust', null);
+        return p;
+      });
+      res.json({ ok: true, data: { pet, points_spent: adoptCost } });
+    } catch (e) {
+      console.error('Adopt error:', e);
+      serverError(res);
+    }
+  });
+
+  app.post('/api/pets/:id/care', requireAuth, (req, res) => {
+    try {
+      const petId = parseInt(req.params.id, 10);
+      const { action } = req.body;
+      const pet = queryOne('SELECT * FROM pets WHERE id = ?', [petId]);
+      if (!pet) return badRequest(res, '宠物不存在');
+
+      // Verify child belongs to family
+      const child = queryOne('SELECT * FROM users WHERE id = ? AND family_id = ?', [pet.child_id, req.user.familyId]);
+      if (!child) return badRequest(res, '无权操作');
+
+      if (!['feed', 'play', 'clean'].includes(action)) return badRequest(res, '无效的操作');
+
+      const cost = getCareCost(action);
+      const childPoints = getChildPoints(pet.child_id);
+      if (childPoints < cost) return badRequest(res, '积分不足，需要 ' + cost + ' 分');
+
+      const actionName = getCareActionName(action);
+      transaction(() => {
+        carePet(petId, action);
+        addPointHistory(req.user.familyId, pet.child_id, req.user.userId, -cost, '🐾 ' + actionName + '宠物：' + pet.pet_name, 'manual_adjust', null);
+      });
+
+      const updatedPet = applyDecay(getPetByChildId(pet.child_id));
+      const newPoints = getChildPoints(pet.child_id);
+
+      res.json({ ok: true, data: { pet: updatedPet, points_spent: cost, total_points: newPoints } });
+    } catch (e) {
+      console.error('Care error:', e);
       serverError(res);
     }
   });
