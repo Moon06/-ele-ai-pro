@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const express = require('express');
 const { initDB } = require('./db');
 const { registerRoutes } = require('./routes');
@@ -5,6 +7,7 @@ const { registerRoutes } = require('./routes');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+app.set('trust proxy', 1);
 app.use(express.json());
 app.use(express.static('public'));
 

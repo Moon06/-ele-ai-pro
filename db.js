@@ -1,161 +1,135 @@
-const initSqlJs = require('sql.js');
-const fs = require('fs');
-const path = require('path');
+const { Pool } = require('pg');
+const { AsyncLocalStorage } = require('async_hooks');
 
-const DB_PATH = path.join(__dirname, 'data', 'family.db');
-const BACKUP_DIR = path.join(__dirname, 'data', 'backups');
-const MAX_BACKUPS = 10;
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL && process.env.DATABASE_URL.includes('neon.tech')
+    ? { rejectUnauthorized: false }
+    : false,
+});
 
-let db = null;
-let _inTransaction = false;
+const txStore = new AsyncLocalStorage();
 
-function saveDB() {
-  if (!db) return;
-  const dir = path.dirname(DB_PATH);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  const data = db.export();
-  fs.writeFileSync(DB_PATH, data);
+function getClient() {
+  return txStore.getStore() || pool;
+}
 
-  // Auto-backup
+async function queryAll(sql, params) {
+  const client = getClient();
+  const result = await client.query(sql, params);
+  return result.rows;
+}
+
+async function queryOne(sql, params) {
+  const rows = await queryAll(sql, params);
+  return rows.length > 0 ? rows[0] : null;
+}
+
+async function runSQL(sql, params) {
+  const client = getClient();
+  await client.query(sql, params);
+}
+
+async function transaction(fn) {
+  const client = await pool.connect();
   try {
-    if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
-    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const backupPath = path.join(BACKUP_DIR, 'family-' + ts + '.db');
-    fs.writeFileSync(backupPath, data);
-    cleanupBackups();
-  } catch (_) { /* backup failure is non-fatal */ }
+    await client.query('BEGIN');
+    const result = await txStore.run(client, fn);
+    await client.query('COMMIT');
+    return result;
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
-function cleanupBackups() {
-  try {
-    const files = fs.readdirSync(BACKUP_DIR)
-      .filter(f => f.startsWith('family-') && f.endsWith('.db'))
-      .sort()
-      .reverse();
-    for (let i = MAX_BACKUPS; i < files.length; i++) {
-      fs.unlinkSync(path.join(BACKUP_DIR, files[i]));
-    }
-  } catch (_) {}
-}
-
-function listBackups() {
-  try {
-    if (!fs.existsSync(BACKUP_DIR)) return [];
-    return fs.readdirSync(BACKUP_DIR)
-      .filter(f => f.startsWith('family-') && f.endsWith('.db'))
-      .sort()
-      .reverse()
-      .map(f => {
-        const stat = fs.statSync(path.join(BACKUP_DIR, f));
-        return { filename: f, size: stat.size, time: stat.mtime.toISOString() };
-      });
-  } catch (_) { return []; }
-}
-
-function restoreBackup(filename) {
-  const backupPath = path.join(BACKUP_DIR, filename);
-  if (!fs.existsSync(backupPath)) return false;
-  // Safety: backup current DB before restoring
-  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const preRestorePath = path.join(BACKUP_DIR, 'pre-restore-' + ts + '.db');
-  try {
-    if (fs.existsSync(DB_PATH)) {
-      fs.copyFileSync(DB_PATH, preRestorePath);
-    }
-    fs.copyFileSync(backupPath, DB_PATH);
-    return true;
-  } catch (_) { return false; }
-}
-
-function getDB() {
-  return db;
-}
+// ---- Init ----
 
 async function initDB() {
-  const SQL = await initSqlJs();
-
-  if (fs.existsSync(DB_PATH)) {
-    const buffer = fs.readFileSync(DB_PATH);
-    db = new SQL.Database(buffer);
-  } else {
-    db = new SQL.Database();
-  }
-
-  db.run('PRAGMA foreign_keys = ON');
-
-  db.run(`
+  // Families
+  await runSQL(`
     CREATE TABLE IF NOT EXISTS families (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
       invite_code TEXT NOT NULL UNIQUE,
-      created_at TEXT DEFAULT (datetime('now','localtime'))
+      created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
 
-  db.run(`
+  // Users
+  await runSQL(`
     CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       username TEXT NOT NULL UNIQUE,
       password_hash TEXT NOT NULL,
       role TEXT NOT NULL CHECK(role IN ('parent','child')),
       family_id INTEGER NOT NULL REFERENCES families(id),
       display_name TEXT NOT NULL,
       avatar_emoji TEXT DEFAULT '🐼',
-      created_at TEXT DEFAULT (datetime('now','localtime'))
+      shop_name TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
 
-  db.run(`
+  // Tasks
+  await runSQL(`
     CREATE TABLE IF NOT EXISTS tasks (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       family_id INTEGER NOT NULL REFERENCES families(id),
       icon TEXT NOT NULL,
       title TEXT NOT NULL,
       points INTEGER NOT NULL CHECK(points > 0),
       is_active INTEGER DEFAULT 1,
-      created_at TEXT DEFAULT (datetime('now','localtime'))
+      created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
 
-  db.run(`
+  // Task completions
+  await runSQL(`
     CREATE TABLE IF NOT EXISTS task_completions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       task_id INTEGER NOT NULL REFERENCES tasks(id),
       child_id INTEGER NOT NULL REFERENCES users(id),
       completed_date TEXT NOT NULL,
       status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
       points_awarded INTEGER DEFAULT 0,
-      created_at TEXT DEFAULT (datetime('now','localtime')),
-      updated_at TEXT DEFAULT (datetime('now','localtime')),
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW(),
       UNIQUE(task_id, child_id, completed_date)
     )
   `);
 
-  db.run(`
+  // Rewards
+  await runSQL(`
     CREATE TABLE IF NOT EXISTS rewards (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       family_id INTEGER NOT NULL REFERENCES families(id),
       icon TEXT NOT NULL,
       title TEXT NOT NULL,
       cost INTEGER NOT NULL CHECK(cost > 0),
       is_active INTEGER DEFAULT 1,
-      created_at TEXT DEFAULT (datetime('now','localtime'))
+      creator_id INTEGER REFERENCES users(id),
+      created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
 
-  db.run(`
+  // Reward redemptions
+  await runSQL(`
     CREATE TABLE IF NOT EXISTS reward_redemptions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       reward_id INTEGER NOT NULL REFERENCES rewards(id),
       child_id INTEGER NOT NULL REFERENCES users(id),
       points_spent INTEGER NOT NULL,
-      created_at TEXT DEFAULT (datetime('now','localtime'))
+      created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
 
-  db.run(`
+  // Point history
+  await runSQL(`
     CREATE TABLE IF NOT EXISTS point_history (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       family_id INTEGER NOT NULL REFERENCES families(id),
       child_id INTEGER NOT NULL REFERENCES users(id),
       operator_id INTEGER NOT NULL REFERENCES users(id),
@@ -163,188 +137,164 @@ async function initDB() {
       reason TEXT NOT NULL,
       reason_type TEXT NOT NULL CHECK(reason_type IN ('task_completion','manual_adjust','reward_redemption','reward_reject_refund')),
       ref_id INTEGER,
-      created_at TEXT DEFAULT (datetime('now','localtime'))
+      created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
 
-  // Pets table
-  db.run(`
+  // Pets
+  await runSQL(`
     CREATE TABLE IF NOT EXISTS pets (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       child_id INTEGER NOT NULL REFERENCES users(id) UNIQUE,
       pet_type TEXT NOT NULL CHECK(pet_type IN ('cat','dog','rabbit')),
       pet_name TEXT NOT NULL,
       hunger INTEGER DEFAULT 80 CHECK(hunger >= 0 AND hunger <= 100),
       mood INTEGER DEFAULT 80 CHECK(mood >= 0 AND mood <= 100),
       clean INTEGER DEFAULT 80 CHECK(clean >= 0 AND clean <= 100),
-      last_decay_at TEXT DEFAULT (datetime('now','localtime')),
-      adopted_at TEXT DEFAULT (datetime('now','localtime'))
+      last_decay_at TIMESTAMPTZ DEFAULT NOW(),
+      adopted_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
 
-  // Drop old view first (sql.js doesn't support CREATE VIEW IF NOT EXISTS cleanly)
-  // Migrations: add columns if they don't exist (sql.js doesn't support IF NOT EXISTS for columns)
-  try { db.run('ALTER TABLE users ADD COLUMN shop_name TEXT'); } catch (_) {}
-  try { db.run('ALTER TABLE rewards ADD COLUMN creator_id INTEGER REFERENCES users(id)'); } catch (_) {}
+  // Migrations
+  await runSQL('ALTER TABLE users ADD COLUMN IF NOT EXISTS shop_name TEXT');
+  await runSQL('ALTER TABLE rewards ADD COLUMN IF NOT EXISTS creator_id INTEGER REFERENCES users(id)');
 
-  db.run('DROP VIEW IF EXISTS child_points');
-  db.run(`
-    CREATE VIEW child_points AS
-    SELECT child_id, SUM(change_amount) AS total_points
-    FROM point_history
-    GROUP BY child_id
-  `);
+  // View
+  await runSQL('CREATE OR REPLACE VIEW child_points AS SELECT child_id, SUM(change_amount) AS total_points FROM point_history GROUP BY child_id');
 
-  saveDB();
-  return db;
-}
-
-// ---- Query helpers ----
-
-function queryAll(sql, params) {
-  const stmt = db.prepare(sql);
-  if (params) stmt.bind(params);
-  const rows = [];
-  while (stmt.step()) {
-    rows.push(stmt.getAsObject());
-  }
-  stmt.free();
-  return rows;
-}
-
-function queryOne(sql, params) {
-  const rows = queryAll(sql, params);
-  return rows.length > 0 ? rows[0] : null;
-}
-
-function runSQL(sql, params) {
-  db.run(sql, params);
-  if (!_inTransaction) saveDB();
+  console.log('Database initialized');
 }
 
 // ---- Family helpers ----
 
-function createFamily(name) {
-  const code = generateInviteCode();
-  runSQL('INSERT INTO families (name, invite_code) VALUES (?, ?)', [name, code]);
-  const family = queryOne('SELECT * FROM families WHERE invite_code = ?', [code]);
-  return family;
+async function createFamily(name) {
+  const code = await generateInviteCode();
+  return queryOne(
+    'INSERT INTO families (name, invite_code) VALUES ($1, $2) RETURNING *',
+    [name, code]
+  );
 }
 
-function generateInviteCode() {
+async function generateInviteCode() {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   let code;
   do {
     code = '';
     for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
-  } while (queryOne('SELECT id FROM families WHERE invite_code = ?', [code]));
+  } while (await queryOne('SELECT id FROM families WHERE invite_code = $1', [code]));
   return code;
 }
 
 // ---- User helpers ----
 
-function createUser(username, passwordHash, role, familyId, displayName, avatarEmoji) {
+async function createUser(username, passwordHash, role, familyId, displayName, avatarEmoji) {
   const defaultShop = role === 'parent' ? (displayName + '的小店') : null;
-  runSQL(
-    'INSERT INTO users (username, password_hash, role, family_id, display_name, avatar_emoji, shop_name) VALUES (?, ?, ?, ?, ?, ?, ?)',
+  return queryOne(
+    'INSERT INTO users (username, password_hash, role, family_id, display_name, avatar_emoji, shop_name) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, username, role, family_id, display_name, avatar_emoji, shop_name, created_at',
     [username, passwordHash, role, familyId, displayName, avatarEmoji || '🐼', defaultShop]
   );
-  return queryOne('SELECT id, username, role, family_id, display_name, avatar_emoji, shop_name, created_at FROM users WHERE username = ?', [username]);
 }
 
-function getUserByUsername(username) {
-  return queryOne('SELECT * FROM users WHERE username = ?', [username]);
+async function getUserByUsername(username) {
+  return queryOne('SELECT * FROM users WHERE username = $1', [username]);
 }
 
-function updateUser(id, fields) {
+async function updateUser(id, fields) {
   const sets = [];
   const params = [];
-  if (fields.display_name !== undefined) { sets.push('display_name = ?'); params.push(fields.display_name); }
-  if (fields.avatar_emoji !== undefined) { sets.push('avatar_emoji = ?'); params.push(fields.avatar_emoji); }
-  if (fields.shop_name !== undefined) { sets.push('shop_name = ?'); params.push(fields.shop_name); }
-  if (fields.password_hash !== undefined) { sets.push('password_hash = ?'); params.push(fields.password_hash); }
+  let p = 1;
+  if (fields.display_name !== undefined) { sets.push('display_name = $' + (p++)); params.push(fields.display_name); }
+  if (fields.avatar_emoji !== undefined) { sets.push('avatar_emoji = $' + (p++)); params.push(fields.avatar_emoji); }
+  if (fields.shop_name !== undefined) { sets.push('shop_name = $' + (p++)); params.push(fields.shop_name); }
+  if (fields.password_hash !== undefined) { sets.push('password_hash = $' + (p++)); params.push(fields.password_hash); }
   if (sets.length === 0) return null;
   params.push(id);
-  runSQL(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`, params);
-  return queryOne('SELECT id, username, role, family_id, display_name, avatar_emoji, shop_name, created_at FROM users WHERE id = ?', [id]);
+  await runSQL('UPDATE users SET ' + sets.join(', ') + ' WHERE id = $' + p, params);
+  return queryOne('SELECT id, username, role, family_id, display_name, avatar_emoji, shop_name, created_at FROM users WHERE id = $1', [id]);
 }
 
-function getUserById(id) {
-  return queryOne('SELECT id, username, role, family_id, display_name, avatar_emoji, shop_name, created_at FROM users WHERE id = ?', [id]);
+async function getUserById(id) {
+  return queryOne('SELECT id, username, role, family_id, display_name, avatar_emoji, shop_name, created_at FROM users WHERE id = $1', [id]);
 }
 
-function getFamilyMembers(familyId) {
+async function getFamilyMembers(familyId) {
   return queryAll(
-    'SELECT id, username, role, family_id, display_name, avatar_emoji, shop_name, created_at FROM users WHERE family_id = ? ORDER BY role, created_at',
+    'SELECT id, username, role, family_id, display_name, avatar_emoji, shop_name, created_at FROM users WHERE family_id = $1 ORDER BY role, created_at',
     [familyId]
   );
 }
 
-function getChildren(familyId) {
-  const children = queryAll(
-    'SELECT u.id, u.username, u.display_name, u.avatar_emoji, COALESCE(cp.total_points, 0) AS total_points FROM users u LEFT JOIN child_points cp ON cp.child_id = u.id WHERE u.family_id = ? AND u.role = ? ORDER BY u.created_at',
+async function getChildren(familyId) {
+  return queryAll(
+    'SELECT u.id, u.username, u.display_name, u.avatar_emoji, COALESCE(cp.total_points, 0) AS total_points FROM users u LEFT JOIN child_points cp ON cp.child_id = u.id WHERE u.family_id = $1 AND u.role = $2 ORDER BY u.created_at',
     [familyId, 'child']
   );
-  return children;
 }
 
 // ---- Task helpers ----
 
-function getTasksWithStatus(familyId, childId, date) {
+async function getTasksWithStatus(familyId, childId, date) {
   return queryAll(
     `SELECT t.id, t.icon, t.title, t.points, t.is_active,
             tc.id AS completion_id, tc.status AS completion_status
      FROM tasks t
-     LEFT JOIN task_completions tc ON tc.task_id = t.id AND tc.child_id = ? AND tc.completed_date = ?
-     WHERE t.family_id = ? AND t.is_active = 1
+     LEFT JOIN task_completions tc ON tc.task_id = t.id AND tc.child_id = $1 AND tc.completed_date = $2
+     WHERE t.family_id = $3 AND t.is_active = 1
      ORDER BY t.id`,
     [childId, date, familyId]
   );
 }
 
-function createTask(familyId, icon, title, points) {
-  runSQL('INSERT INTO tasks (family_id, icon, title, points) VALUES (?, ?, ?, ?)', [familyId, icon, title, points]);
-  return queryOne('SELECT * FROM tasks WHERE family_id = ? AND title = ? ORDER BY id DESC LIMIT 1', [familyId, title]);
+async function createTask(familyId, icon, title, points) {
+  return queryOne(
+    'INSERT INTO tasks (family_id, icon, title, points) VALUES ($1, $2, $3, $4) RETURNING *',
+    [familyId, icon, title, points]
+  );
 }
 
-function updateTask(taskId, familyId, fields) {
+async function updateTask(taskId, familyId, fields) {
   const sets = [];
   const params = [];
-  if (fields.icon !== undefined) { sets.push('icon = ?'); params.push(fields.icon); }
-  if (fields.title !== undefined) { sets.push('title = ?'); params.push(fields.title); }
-  if (fields.points !== undefined) { sets.push('points = ?'); params.push(fields.points); }
-  if (fields.is_active !== undefined) { sets.push('is_active = ?'); params.push(fields.is_active); }
+  let p = 1;
+  if (fields.icon !== undefined) { sets.push('icon = $' + (p++)); params.push(fields.icon); }
+  if (fields.title !== undefined) { sets.push('title = $' + (p++)); params.push(fields.title); }
+  if (fields.points !== undefined) { sets.push('points = $' + (p++)); params.push(fields.points); }
+  if (fields.is_active !== undefined) { sets.push('is_active = $' + (p++)); params.push(fields.is_active); }
   if (sets.length === 0) return null;
-  params.push(taskId, familyId);
-  runSQL(`UPDATE tasks SET ${sets.join(', ')} WHERE id = ? AND family_id = ?`, params);
-  return queryOne('SELECT * FROM tasks WHERE id = ?', [taskId]);
+  params.push(taskId);
+  params.push(familyId);
+  await runSQL('UPDATE tasks SET ' + sets.join(', ') + ' WHERE id = $' + (p++) + ' AND family_id = $' + p, params);
+  return queryOne('SELECT * FROM tasks WHERE id = $1', [taskId]);
 }
 
-function deleteTask(taskId, familyId) {
-  runSQL('UPDATE tasks SET is_active = 0 WHERE id = ? AND family_id = ?', [taskId, familyId]);
+async function deleteTask(taskId, familyId) {
+  await runSQL('UPDATE tasks SET is_active = 0 WHERE id = $1 AND family_id = $2', [taskId, familyId]);
 }
 
 // ---- Task completion helpers ----
 
-function getCompletion(taskId, childId, date) {
+async function getCompletion(taskId, childId, date) {
   return queryOne(
-    'SELECT * FROM task_completions WHERE task_id = ? AND child_id = ? AND completed_date = ?',
+    'SELECT * FROM task_completions WHERE task_id = $1 AND child_id = $2 AND completed_date = $3',
     [taskId, childId, date]
   );
 }
 
-function createCompletion(taskId, childId, date, status) {
-  runSQL(
-    'INSERT OR IGNORE INTO task_completions (task_id, child_id, completed_date, status) VALUES (?, ?, ?, ?)',
+async function createCompletion(taskId, childId, date, status) {
+  const row = await queryOne(
+    'INSERT INTO task_completions (task_id, child_id, completed_date, status) VALUES ($1, $2, $3, $4) ON CONFLICT (task_id, child_id, completed_date) DO NOTHING RETURNING *',
     [taskId, childId, date, status]
   );
+  if (row) return row;
+  // Conflict occurred — return existing row
   return queryOne(
-    'SELECT * FROM task_completions WHERE task_id = ? AND child_id = ? AND completed_date = ?',
+    'SELECT * FROM task_completions WHERE task_id = $1 AND child_id = $2 AND completed_date = $3',
     [taskId, childId, date]
   );
 }
 
-function getPendingReviews(familyId) {
+async function getPendingReviews(familyId) {
   return queryAll(
     `SELECT tc.id, tc.task_id, tc.child_id, tc.completed_date, tc.status, tc.created_at,
             t.icon, t.title AS task_title, t.points,
@@ -352,112 +302,115 @@ function getPendingReviews(familyId) {
      FROM task_completions tc
      JOIN tasks t ON t.id = tc.task_id
      JOIN users u ON u.id = tc.child_id
-     WHERE t.family_id = ? AND tc.status = 'pending'
+     WHERE t.family_id = $1 AND tc.status = 'pending'
      ORDER BY tc.created_at DESC`,
     [familyId]
   );
 }
 
-function approveCompletion(completionId, taskPoints) {
-  runSQL(
-    "UPDATE task_completions SET status = 'approved', points_awarded = ?, updated_at = datetime('now','localtime') WHERE id = ? AND status = 'pending'",
+async function approveCompletion(completionId, taskPoints) {
+  await runSQL(
+    "UPDATE task_completions SET status = 'approved', points_awarded = $1, updated_at = NOW() WHERE id = $2 AND status = 'pending'",
     [taskPoints, completionId]
   );
-  return queryOne('SELECT * FROM task_completions WHERE id = ?', [completionId]);
+  return queryOne('SELECT * FROM task_completions WHERE id = $1', [completionId]);
 }
 
-function rejectCompletion(completionId) {
-  runSQL(
-    "UPDATE task_completions SET status = 'rejected', updated_at = datetime('now','localtime') WHERE id = ? AND status = 'pending'",
+async function rejectCompletion(completionId) {
+  await runSQL(
+    "UPDATE task_completions SET status = 'rejected', updated_at = NOW() WHERE id = $1 AND status = 'pending'",
     [completionId]
   );
 }
 
-function resetAllTasks(familyId, date) {
-  // Reset task completions for today — mark pending ones as rejected
-  runSQL(
-    `UPDATE task_completions SET status = 'rejected', updated_at = datetime('now','localtime')
-     WHERE status = 'pending' AND completed_date = ? AND task_id IN (SELECT id FROM tasks WHERE family_id = ?)`,
+async function resetAllTasks(familyId, date) {
+  await runSQL(
+    `UPDATE task_completions SET status = 'rejected', updated_at = NOW()
+     WHERE status = 'pending' AND completed_date = $1 AND task_id IN (SELECT id FROM tasks WHERE family_id = $2)`,
     [date, familyId]
   );
 }
 
 // ---- Reward helpers ----
 
-function getRewards(familyId) {
+async function getRewards(familyId) {
   return queryAll(
     `SELECT r.id, r.icon, r.title, r.cost, r.is_active, r.creator_id,
             u.display_name AS creator_name, u.avatar_emoji AS creator_emoji, u.shop_name AS creator_shop
      FROM rewards r
      LEFT JOIN users u ON u.id = r.creator_id
-     WHERE r.family_id = ? AND r.is_active = 1
+     WHERE r.family_id = $1 AND r.is_active = 1
      ORDER BY r.creator_id, r.id`,
     [familyId]
   );
 }
 
-function getRewardById(rewardId) {
-  return queryOne('SELECT * FROM rewards WHERE id = ?', [rewardId]);
+async function getRewardById(rewardId) {
+  return queryOne('SELECT * FROM rewards WHERE id = $1', [rewardId]);
 }
 
-function createReward(familyId, icon, title, cost, creatorId) {
-  runSQL('INSERT INTO rewards (family_id, icon, title, cost, creator_id) VALUES (?, ?, ?, ?, ?)', [familyId, icon, title, cost, creatorId || null]);
-  return queryOne('SELECT * FROM rewards WHERE family_id = ? AND title = ? ORDER BY id DESC LIMIT 1', [familyId, title]);
+async function createReward(familyId, icon, title, cost, creatorId) {
+  return queryOne(
+    'INSERT INTO rewards (family_id, icon, title, cost, creator_id) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+    [familyId, icon, title, cost, creatorId || null]
+  );
 }
 
-
-function updateReward(rewardId, familyId, fields) {
+async function updateReward(rewardId, familyId, fields) {
   const sets = [];
   const params = [];
-  if (fields.icon !== undefined) { sets.push('icon = ?'); params.push(fields.icon); }
-  if (fields.title !== undefined) { sets.push('title = ?'); params.push(fields.title); }
-  if (fields.cost !== undefined) { sets.push('cost = ?'); params.push(fields.cost); }
+  let p = 1;
+  if (fields.icon !== undefined) { sets.push('icon = $' + (p++)); params.push(fields.icon); }
+  if (fields.title !== undefined) { sets.push('title = $' + (p++)); params.push(fields.title); }
+  if (fields.cost !== undefined) { sets.push('cost = $' + (p++)); params.push(fields.cost); }
   if (sets.length === 0) return null;
-  params.push(rewardId, familyId);
-  runSQL(`UPDATE rewards SET ${sets.join(', ')} WHERE id = ? AND family_id = ?`, params);
-  return queryOne('SELECT * FROM rewards WHERE id = ?', [rewardId]);
+  params.push(rewardId);
+  params.push(familyId);
+  await runSQL('UPDATE rewards SET ' + sets.join(', ') + ' WHERE id = $' + (p++) + ' AND family_id = $' + p, params);
+  return queryOne('SELECT * FROM rewards WHERE id = $1', [rewardId]);
 }
 
-function deleteReward(rewardId, familyId) {
-  runSQL('UPDATE rewards SET is_active = 0 WHERE id = ? AND family_id = ?', [rewardId, familyId]);
+async function deleteReward(rewardId, familyId) {
+  await runSQL('UPDATE rewards SET is_active = 0 WHERE id = $1 AND family_id = $2', [rewardId, familyId]);
 }
 
-function createRedemption(rewardId, childId, pointsSpent) {
-  runSQL('INSERT INTO reward_redemptions (reward_id, child_id, points_spent) VALUES (?, ?, ?)', [rewardId, childId, pointsSpent]);
-  return queryOne('SELECT * FROM reward_redemptions WHERE reward_id = ? AND child_id = ? ORDER BY id DESC LIMIT 1', [rewardId, childId]);
+async function createRedemption(rewardId, childId, pointsSpent) {
+  return queryOne(
+    'INSERT INTO reward_redemptions (reward_id, child_id, points_spent) VALUES ($1, $2, $3) RETURNING *',
+    [rewardId, childId, pointsSpent]
+  );
 }
 
 // ---- Point history helpers ----
 
-function getChildPoints(childId) {
-  const row = queryOne('SELECT total_points FROM child_points WHERE child_id = ?', [childId]);
+async function getChildPoints(childId) {
+  const row = await queryOne('SELECT total_points FROM child_points WHERE child_id = $1', [childId]);
   return row ? row.total_points : 0;
 }
 
-function addPointHistory(familyId, childId, operatorId, changeAmount, reason, reasonType, refId) {
-  runSQL(
-    'INSERT INTO point_history (family_id, child_id, operator_id, change_amount, reason, reason_type, ref_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+async function addPointHistory(familyId, childId, operatorId, changeAmount, reason, reasonType, refId) {
+  return queryOne(
+    'INSERT INTO point_history (family_id, child_id, operator_id, change_amount, reason, reason_type, ref_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
     [familyId, childId, operatorId, changeAmount, reason, reasonType, refId || null]
   );
-  return queryOne('SELECT * FROM point_history WHERE family_id = ? AND child_id = ? AND reason = ? ORDER BY id DESC LIMIT 1', [familyId, childId, reason]);
 }
 
-function getHistory(familyId, childId, limit) {
+async function getHistory(familyId, childId, limit) {
   let sql = `
     SELECT ph.id, ph.child_id, ph.operator_id, ph.change_amount, ph.reason, ph.reason_type, ph.created_at,
            u.display_name AS child_name
     FROM point_history ph
     JOIN users u ON u.id = ph.child_id
-    WHERE ph.family_id = ?
+    WHERE ph.family_id = $1
   `;
   const params = [familyId];
 
   if (childId) {
-    sql += ' AND ph.child_id = ?';
+    sql += ' AND ph.child_id = $' + (params.length + 1);
     params.push(childId);
   }
 
-  sql += ' ORDER BY ph.created_at DESC LIMIT ?';
+  sql += ' ORDER BY ph.created_at DESC LIMIT $' + (params.length + 1);
   params.push(limit || 50);
 
   return queryAll(sql, params);
@@ -465,7 +418,7 @@ function getHistory(familyId, childId, limit) {
 
 // ---- Seed data ----
 
-function seedDefaults(familyId, creatorId) {
+async function seedDefaults(familyId, creatorId) {
   const defaultTasks = [
     { icon: '🪥', title: '按时刷牙洗脸', points: 5 },
     { icon: '✏️', title: '认真写完作业', points: 10 },
@@ -483,48 +436,28 @@ function seedDefaults(familyId, creatorId) {
   ];
 
   for (const t of defaultTasks) {
-    runSQL('INSERT INTO tasks (family_id, icon, title, points) VALUES (?, ?, ?, ?)', [familyId, t.icon, t.title, t.points]);
+    await runSQL('INSERT INTO tasks (family_id, icon, title, points) VALUES ($1, $2, $3, $4)', [familyId, t.icon, t.title, t.points]);
   }
 
   for (const r of defaultRewards) {
-    runSQL('INSERT INTO rewards (family_id, icon, title, cost, creator_id) VALUES (?, ?, ?, ?, ?)', [familyId, r.icon, r.title, r.cost, creatorId || null]);
+    await runSQL('INSERT INTO rewards (family_id, icon, title, cost, creator_id) VALUES ($1, $2, $3, $4, $5)', [familyId, r.icon, r.title, r.cost, creatorId || null]);
   }
 }
 
-// ---- Transaction helper ----
+// ---- Pet helpers ----
 
-function transaction(fn) {
-  _inTransaction = true;
-  db.run('BEGIN');
-  try {
-    const result = fn();
-    db.run('COMMIT');
-    _inTransaction = false;
-    saveDB();
-    return result;
-  } catch (e) {
-    _inTransaction = false;
-    try { db.run('ROLLBACK'); } catch (_) {}
-    saveDB();
-    throw e;
-  }
+async function getPetByChildId(childId) {
+  return queryOne('SELECT * FROM pets WHERE child_id = $1', [childId]);
 }
 
-  // ---- Pet helpers ----
-
-function getPetByChildId(childId) {
-  return queryOne('SELECT * FROM pets WHERE child_id = ?', [childId]);
-}
-
-function createPet(childId, petType, petName) {
-  runSQL(
-    'INSERT INTO pets (child_id, pet_type, pet_name) VALUES (?, ?, ?)',
+async function createPet(childId, petType, petName) {
+  return queryOne(
+    'INSERT INTO pets (child_id, pet_type, pet_name) VALUES ($1, $2, $3) RETURNING *',
     [childId, petType, petName]
   );
-  return getPetByChildId(childId);
 }
 
-function applyDecay(pet) {
+async function applyDecay(pet) {
   if (!pet) return null;
   var now = new Date();
   var last = new Date(pet.last_decay_at);
@@ -536,29 +469,29 @@ function applyDecay(pet) {
   var newMood = Math.max(0, pet.mood - Math.floor(decay * 0.6));
   var newClean = Math.max(0, pet.clean - Math.floor(decay * 0.4));
 
-  runSQL(
-    "UPDATE pets SET hunger = ?, mood = ?, clean = ?, last_decay_at = datetime('now','localtime') WHERE id = ?",
+  await runSQL(
+    'UPDATE pets SET hunger = $1, mood = $2, clean = $3, last_decay_at = NOW() WHERE id = $4',
     [newHunger, newMood, newClean, pet.id]
   );
   return getPetByChildId(pet.child_id);
 }
 
-function carePet(petId, action) {
-  var pet = queryOne('SELECT * FROM pets WHERE id = ?', [petId]);
+async function carePet(petId, action) {
+  var pet = await queryOne('SELECT * FROM pets WHERE id = $1', [petId]);
   if (!pet) return null;
 
   if (action === 'feed') {
     var h = Math.min(100, pet.hunger + 25);
-    runSQL("UPDATE pets SET hunger = ? WHERE id = ?", [h, petId]);
+    await runSQL('UPDATE pets SET hunger = $1 WHERE id = $2', [h, petId]);
   } else if (action === 'play') {
     var m = Math.min(100, pet.mood + 30);
-    runSQL("UPDATE pets SET mood = ? WHERE id = ?", [m, petId]);
+    await runSQL('UPDATE pets SET mood = $1 WHERE id = $2', [m, petId]);
   } else if (action === 'clean') {
     var c = Math.min(100, pet.clean + 35);
-    runSQL("UPDATE pets SET clean = ? WHERE id = ?", [c, petId]);
+    await runSQL('UPDATE pets SET clean = $1 WHERE id = $2', [c, petId]);
   }
 
-  return queryOne('SELECT * FROM pets WHERE id = ?', [petId]);
+  return queryOne('SELECT * FROM pets WHERE id = $1', [petId]);
 }
 
 function getCareCost(action) {
@@ -575,52 +508,52 @@ function getCareActionName(action) {
   return '';
 }
 
+// ---- Backup stubs (cloud DB handles persistence) ----
+
+function listBackups() {
+  return [];
+}
+
+function restoreBackup(filename) {
+  return false;
+}
+
 module.exports = {
   initDB,
-  getDB,
   queryAll,
   queryOne,
   runSQL,
   transaction,
-  // Family
   createFamily,
   generateInviteCode,
-  // User
   createUser,
   getUserByUsername,
   getUserById,
   updateUser,
   getFamilyMembers,
   getChildren,
-  // Tasks
   getTasksWithStatus,
   createTask,
   updateTask,
   deleteTask,
-  // Completions
   getCompletion,
   createCompletion,
   getPendingReviews,
   approveCompletion,
   rejectCompletion,
   resetAllTasks,
-  // Rewards
   getRewards,
   getRewardById,
   createReward,
   updateReward,
   deleteReward,
   createRedemption,
-  // Points
   getChildPoints,
   addPointHistory,
   getHistory,
-  // Seed
   seedDefaults,
-  // Backup
   listBackups,
   restoreBackup,
-  // Pets
   getPetByChildId,
   createPet,
   applyDecay,
